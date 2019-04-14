@@ -27,29 +27,12 @@ def get_temps():
         data[d[1]-1]['x'].append(d[0])
         data[d[1]-1]['y'].append(d[2])
 
-#    fans = [ {'x': [], 'y': []}, {'x': [], 'y': []} ]
-#    cursor.execute("SELECT DATE_FORMAT( CONVERT_TZ(time, 'UTC', 'America/New_York'), '%Y-%m-%d %k:%i:%s') as t, fan0, fan1 from fans")
-#    for d in cursor:
-#        fans[0]['x'].append(d[0])
-#        fans[1]['x'].append(d[0])
-#        fans[0]['y'].append(d[1])
-#        fans[1]['y'].append(d[2])
-
     return jsonify(temps=data)
-#    return app.response_class(data, mimetype='application/json')
-
-@app.route('/update', methods=['GET', 'POST'])
-def update():
-    print(request.form)
-    return 'updated'
 
 @app.route('/post_temps', methods=['GET', 'POST'])
 def post_temps():
     db=connect_db()
-    #print(request.data)
     js = request.get_json(force=True)
-    #print(js)
-    #print request.headers
 
     for s in js['temperatures']:
         sn = s['sn']
@@ -69,7 +52,7 @@ def post_temps():
         cursor.execute("INSERT INTO temps (id, temp) VALUES (%i, %f)" % (id, float(t)))
         db.commit()
 
-    return jsonify({'fanstate': [1, 0]})
+    return jsonify({'success': [1, 1]})
 
 @app.route('/initdb')
 def initdb():
