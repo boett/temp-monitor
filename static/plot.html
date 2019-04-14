@@ -1,0 +1,29 @@
+<head>
+  <!-- Plotly.js -->
+  <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+
+</head>
+
+<!-- Plots go in blank <div> elements.
+    You can size them in the plot layout,
+    or give the div a size as shown here.
+-->
+<div id="tester" style="width:90%;height:800px;"></div>
+
+<script>
+  TESTER = document.getElementById('tester');
+
+  Plotly.d3.json("http://pwb.pythonanywhere.com/get_temps", function(err, data) {
+  //console.log(data);
+      temps = data['temps'];
+
+  temps[0]['name'] = 'Sensor 1';
+  var layout = {
+    title: 'Organ temperatures',
+    yaxis: {title: 'Temps'},
+  };
+
+  //Plotly.plot(TESTER,  data , {'title': 'Temperatures'});
+  Plotly.plot(TESTER,  temps, layout);
+  });
+</script>
