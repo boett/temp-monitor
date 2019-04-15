@@ -1,5 +1,5 @@
 
-from flask import Flask, request, jsonify, redirect
+from flask import Flask, request, jsonify, redirect, render_template
 import MySQLdb
 
 app = Flask(__name__)
@@ -20,12 +20,17 @@ def root():
 def get_temps():
     db=connect_db()
     cursor = db.cursor()
+    data = []
+    cursor.execute("SELECT id, name from sensors")
+    for r in cursor:
+        data.append( {'id': r[0], 'name': r[1], 'x': [], 'y': []})
+
     cursor.execute("SELECT DATE_FORMAT( CONVERT_TZ(time, 'UTC', 'America/New_York'), '%Y-%m-%d %k:%i:%s') as t, id, temp from temps")
 
-    data= [ {'x': [], 'y': []}, {'x': [], 'y': []}, {'x': [], 'y': []} ]
     for d in cursor:
-        data[d[1]-1]['x'].append(d[0])
-        data[d[1]-1]['y'].append(d[2])
+        idx = d[1] - 1
+        data[idx]['x'].append(d[0])
+        data[idx]['y'].append(d[2])
 
     return jsonify(temps=data)
 
@@ -54,6 +59,26 @@ def post_temps():
 
     return jsonify({'success': [1, 1]})
 
+@app.route('/sensors')
+def sensors():
+    db=connect_db()
+    cursor = db.cursor()
+    cursor.execute("SELECT id, sn, name from sensors")
+    sensors = [ {'id': r[0], 'sn': r[1], 'name': r[2]} for r in cursor ]
+    return render_template('sensors.html', sensors=sensors)
+
+@app.route('/sensoredit', methods=['GET', 'POST'])
+def sensoredit():
+    db=connect_db()
+    res = request.get_json(force=True)
+
+    for r in res['sensors']:
+        cursor = db.cursor()
+        cursor.execute("UPDATE sensors SET name=%s WHERE id=%s", (r[1],r[0]))
+
+    db.commit()
+    return jsonify({'success': 1})
+
 @app.route('/initdb')
 def initdb():
     return
@@ -65,7 +90,7 @@ def initdb():
     cursor.execute("DROP TABLE IF EXISTS log;")
 
     cursor.execute("CREATE TABLE temps (time DATETIME DEFAULT NOW(), id INT, temp REAL);")
-    cursor.execute("CREATE TABLE sensors (id INT NOT NULL AUTO_INCREMENT, sn CHAR(16), PRIMARY KEY (id));")
+    cursor.execute("CREATE TABLE sensors (id INT NOT NULL AUTO_INCREMENT, sn CHAR(16), name VARCHAR(256) PRIMARY KEY (id));")
     cursor.execute("CREATE TABLE log (time DATETIME DEFAULT NOW(), msg VARCHAR(256));")
 
     db.commit()
