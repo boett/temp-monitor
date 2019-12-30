@@ -3,20 +3,21 @@
 //shin-ajaran.blogspot.com
 //nodemcu pinout https://github.com/esp8266/Arduino/issues/584
 #include <ESP8266WiFi.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
+//#include <OneWire.h>
+//#include <DallasTemperature.h>
+#include "HX711.h"
+
+const int LOADCELL_DOUT_PIN = 4;
+const int LOADCELL_SCK_PIN = 0;
+
+const int PIR_PIN = 5;
 
 void connectWifi();
-void sendTemperatures(float *temp);
 void sayHello();
+String build_full_json();
+void sendJSON(const String &json);
 
-//Def
-#define myPeriodic 180 //in sec | Thingspeak pub is 15sec
-#define ONE_WIRE_BUS 2  // DS18B20 on arduino pin2 corresponds to D4 on physical board
-//#define ONE_WIRE_BUS 15  // DS18B20 on arduino pin2 corresponds to D4 on physical board
-
-OneWire oneWire(ONE_WIRE_BUS);
-DallasTemperature DS18B20(&oneWire);
+HX711 scale;
 
 struct nw {
   const char *ssid;
@@ -33,28 +34,93 @@ nw networks[] = { {"ssid1", "pw1"},
 */
 #include "networks.h"
 
-DeviceAddress addr[8];
-uint8_t nSensors=0;
 
-String genAddressString(const DeviceAddress &addr)
+template <typename T>
+String build_json(const String name, T val, const String &id = String(""))
 {
-  char str[18];
-  String ret;
-  for(int i=0; i<8; ++i) {
-    //ret += String(addr[i], HEX);
-    sprintf(str + 2*i, "%.2x", addr[i]);
-  }
-  return String(str);
+    String idStr = id;
+
+    if(id.length() == 0) {
+        char msg[32];
+        sprintf(msg, "%08X", ESP.getChipId());
+        idStr = name + msg;
+    }
+
+    String obj = "{ \"type\": \"" + name + "\", \"val\": " + String(val) + ", \"id\": \"" + idStr + "\"}";
+    return obj;
 }
+
+struct Averager {
+    double cur_val;
+    int cnt;
+    void submit(double val) {
+        cur_val += val;
+        cnt++;
+    }
+    void reset() {
+        cnt = 0;
+        cur_val = 0;
+    }
+    double val() {
+        return cur_val / static_cast<double>(cnt);
+    }
+};
+
+struct Sensor {
+    String name;
+    String id;
+    Averager avg;
+    virtual double get_cur_reading() = 0;
+    void DoMeasure() {
+        avg.submit(get_cur_reading());
+    }
+    String GetJSONObj(void) {
+        return build_json(name, avg.val(), id);
+    }
+};
+
+struct Scale : public Sensor {
+    double get_cur_reading() override {
+        if (scale.is_ready()) {
+            return(static_cast<double>(scale.read_average(8)));
+        } else {
+            Serial.println("HX711 not found.");
+        }
+        return(0.0);
+    }
+};
+
+struct PIR : public Sensor {
+    double get_cur_reading() override {
+        return static_cast<double>(digitalRead(PIR_PIN));
+    }
+};
+
+std::vector<Sensor *> sensors;
+int cntReading = 0;
 
 int sent = 0;
 void setup() {
-  Serial.begin(115200);
-  connectWifi();
+    Serial.begin(115200);
+    connectWifi();
 
-  DS18B20.begin();
-  nSensors = DS18B20.getDS18Count();
+    scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+    scale.power_up();
 
+    pinMode(PIR_PIN, INPUT);
+
+    Scale *s = new Scale();
+    s->name = "strain";
+    sensors.push_back(s);
+
+    PIR *p = new PIR();
+    p->name = "pir";
+    sensors.push_back(p);
+
+  //DS18B20.begin();
+  //nSensors = DS18B20.getDS18Count();
+
+  /*
   Serial.println(String("found ") + String(nSensors) + " DS18B20 sensors:");
   for(uint8_t i=0; i<nSensors; i++) {
     bool ret = DS18B20.getAddress(addr[i], i);
@@ -63,25 +129,30 @@ void setup() {
     else
       Serial.println("failure");
   }
-
+  */
   sayHello();
 }
 
 void loop() {
-  float temps[8];
 
-  DS18B20.requestTemperatures();
-  for(int i=0; i<nSensors; ++i) {
-    temps[i] = DS18B20.getTempF(addr[i]);
-    Serial.println(String("Sensor ") + genAddressString(addr[i]) + ": " + String(temps[i]));
-  }
+    for(auto &s : sensors) {
+        s->DoMeasure();
+    }
 
-  //Serial.printf(" ESP8266 Chip id = %08X\n", ESP.getChipId());
-  
-  sendTemperatures(temps);
-  int count = myPeriodic;
-  while(count--)
-  delay(1000);
+    Serial.println(build_full_json());
+
+    if(++cntReading >= 60) {
+        cntReading = 0;
+
+        sendJSON(build_full_json());
+
+        for(auto &s : sensors) {
+            s->avg.reset();
+        }
+
+    }
+
+    delay(1000);
 }
 
 void connectWifi()
@@ -119,56 +190,54 @@ void connectWifi()
   Serial.println("");  
 }//end connect
 
-void sendTemperatures(float *temp)
+String build_full_json()
 {
-  String postStr = "{ \"temperatures\": [ ";
-  for(int i=0; i<nSensors; i++) {
-    postStr += "{\"sn\": \"" + genAddressString(addr[i]) + "\", \"temp\": " + String(temp[i]) + "}";
-    if(i<nSensors-1)
-      postStr += ",";
-  }
-  postStr += "] }";
+    String json = "{ \"measurements\": [";
+    bool first = true;
+    for(auto &s : sensors) {
+        if(!first) {
+            json += ", ";
+        }
+        first = false;
+        json += s->GetJSONObj();
+    }
+    json += " ]}";
+    return json;
+}
 
-  Serial.println(postStr);
-    
-   WiFiClient client;
-  
-   if (client.connect(server, 80)) { // use ip 184.106.153.149 or api.thingspeak.com
-   Serial.println("WiFi Client connected ");
-
-   client.print("POST /post_temps HTTP/1.1\n");
-   client.print(String("Host: ") + server + "\n");
-   client.print("Connection: close\n");
-   client.print("Content-Type: application/json\n");
-   client.print("Content-Length: ");
-   client.print(postStr.length());
-   client.print("\n\n");
-   client.print(postStr);
-   delay(1000);
-   
+void sendJSON(const String &json)
+{
+    WiFiClient client;
+    if (client.connect(server, 80)) { // use ip 184.106.153.149 or api.thingspeak.com
+        Serial.println("WiFi Client connected ");
+        
+        client.print("POST /post_measurements HTTP/1.1\n");
+        client.print(String("Host: ") + server + "\n");
+        client.print("Connection: close\n");
+        client.print("Content-Type: application/json\n");
+        client.print("Content-Length: ");
+        client.print(json.length());
+        client.print("\n\n");
+        client.print(json);
+        delay(1000);
+        client.read();
    }//end if
    sent++;
- client.stop();
+   client.stop();
 }//end send
 
 void sayHello()
 {
+  
   char msg[32];
   sprintf(msg, "%08X", ESP.getChipId());
 
-  String postStr = String("{ \"chip\": \"") + msg + "\", \"sensors\": [ ";
-  for(int i=0; i<nSensors; i++) {
-    postStr += "\"" + genAddressString(addr[i]) + "\"";
-    if(i<nSensors-1)
-      postStr += ", ";
-  }
-  postStr += "] }";
-
+  String postStr = String("{ \"chip\": \"") + msg + "}";
   Serial.println(postStr);
     
-   WiFiClient client;
+  WiFiClient client;
   
-   if (client.connect(server, 80)) { // use ip 184.106.153.149 or api.thingspeak.com
+  if (client.connect(server, 80)) { // use ip 184.106.153.149 or api.thingspeak.com
    Serial.println("WiFi Client connected ");
 
    client.print("POST /hello HTTP/1.1\n");
@@ -184,4 +253,6 @@ void sayHello()
    }//end if
 
  client.stop();
+  
+  
 }//end send
