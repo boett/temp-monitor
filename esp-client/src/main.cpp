@@ -70,6 +70,10 @@ struct Sensor {
     String name;
     String id;
     Averager avg;
+    bool present;
+
+    Sensor() : present(true) {}
+    bool is_present() const { return present; }
     virtual double get_cur_reading() = 0;
     void DoMeasure() {
         avg.submit(get_cur_reading());
@@ -82,9 +86,12 @@ struct Sensor {
 struct Scale : public Sensor {
     double get_cur_reading() override {
         if (scale.is_ready()) {
-            return(static_cast<double>(scale.read_average(8)));
+            long x = scale.read_average(8);
+            Serial.println(x);
+            return(static_cast<double>(x));
         } else {
             Serial.println("HX711 not found.");
+            present = false;
         }
         return(0.0);
     }
@@ -92,6 +99,7 @@ struct Scale : public Sensor {
 
 struct PIR : public Sensor {
     double get_cur_reading() override {
+        Serial.println(digitalRead(PIR_PIN));
         return static_cast<double>(digitalRead(PIR_PIN));
     }
 };
@@ -138,8 +146,6 @@ void loop() {
     for(auto &s : sensors) {
         s->DoMeasure();
     }
-
-    Serial.println(build_full_json());
 
     if(++cntReading >= 60) {
         cntReading = 0;
@@ -195,6 +201,9 @@ String build_full_json()
     String json = "{ \"measurements\": [";
     bool first = true;
     for(auto &s : sensors) {
+        if(!s->is_present())
+            continue;
+            
         if(!first) {
             json += ", ";
         }
