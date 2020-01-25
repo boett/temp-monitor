@@ -3,9 +3,12 @@
 //shin-ajaran.blogspot.com
 //nodemcu pinout https://github.com/esp8266/Arduino/issues/584
 #include <ESP8266WiFi.h>
+#include <ESP8266httpUpdate.h>
 //#include <OneWire.h>
 //#include <DallasTemperature.h>
 #include "HX711.h"
+
+const int MY_VERSION = 6;
 
 const int LOADCELL_DOUT_PIN = 4;
 const int LOADCELL_SCK_PIN = 0;
@@ -141,6 +144,33 @@ void setup() {
   sayHello();
 }
 
+void doOTAupdate()
+{
+    WiFiClient client;
+    if (client.connect(server, 80))
+    {
+        Serial.println("Connected to server for update");
+        t_httpUpdate_return ret = ESPhttpUpdate.update(client, server, 80, "/static/sensor.bin", "optional current version string here");
+        int err = ESPhttpUpdate.getLastError();
+        String errStr = ESPhttpUpdate.getLastErrorString();
+        Serial.println(errStr + " " + String(err));
+
+        switch (ret)
+        {
+        case HTTP_UPDATE_FAILED:
+            Serial.println("[update] Update failed.");
+            break;
+        case HTTP_UPDATE_NO_UPDATES:
+            Serial.println("[update] Update no Update.");
+            break;
+        case HTTP_UPDATE_OK:
+            Serial.println("[update] Update ok."); // may not called we reboot the ESP
+            break;
+        }
+    }
+}
+
+int totalCount = 0;
 void loop() {
 
     for(auto &s : sensors) {
@@ -156,6 +186,11 @@ void loop() {
             s->avg.reset();
         }
 
+        totalCount++;
+
+        if(totalCount >= 60) {
+            ESP.reset();
+        }
     }
 
     delay(1000);
@@ -237,31 +272,55 @@ void sendJSON(const String &json)
 
 void sayHello()
 {
-  
-  char msg[32];
-  sprintf(msg, "%08X", ESP.getChipId());
+    Serial.println("Version " + String(MY_VERSION));
 
-  String postStr = String("{ \"chip\": \"") + msg + "}";
-  Serial.println(postStr);
-    
-  WiFiClient client;
-  
-  if (client.connect(server, 80)) { // use ip 184.106.153.149 or api.thingspeak.com
-   Serial.println("WiFi Client connected ");
+    char msg[32];
+    sprintf(msg, "%08X", ESP.getChipId());
 
-   client.print("POST /hello HTTP/1.1\n");
-   client.print(String("Host: ") + server + "\n");
-   client.print("Connection: close\n");
-   client.print("Content-Type: application/json\n");
-   client.print("Content-Length: ");
-   client.print(postStr.length());
-   client.print("\n\n");
-   client.print(postStr);
-   delay(1000);
-   
-   }//end if
+    String postStr = String("{ \"chip\": \"") + msg + "\" }";
+    Serial.println(postStr);
 
- client.stop();
-  
-  
+    uint8_t buf[256];
+
+    WiFiClient client;
+    int version = 0;
+
+    if (client.connect(server, 80))
+    { // use ip 184.106.153.149 or api.thingspeak.com
+        Serial.println("WiFi Client connected ");
+
+        client.print("POST /hello HTTP/1.1\n");
+        client.print(String("Host: ") + server + "\n");
+        client.print("Connection: close\n");
+        client.print("Content-Type: application/json\n");
+        client.print("Content-Length: ");
+        client.print(postStr.length());
+        client.print("\n\n");
+        client.print(postStr);
+        delay(1000);
+        int ret = client.read(buf, 256);
+        (void) ret;
+
+        String servermessage(reinterpret_cast<char *>(&buf[0]));
+        //Serial.println(String(ret) + " " + servermessage);
+        //int headerend = servermessage.indexOf("\r\n\r\n");
+        //Serial.println(servermessage.substring(headerend));
+
+        int veroffset = servermessage.indexOf("fwversion\": ");
+        String version_partial = servermessage.substring(veroffset + 12);
+        int verend = version_partial.indexOf("\n");
+
+        version = version_partial.substring(0, verend).toInt();
+        //Serial.println(String("***") + String(version) + String("***"));
+
+        Serial.println("Server has version " + String(version));
+    } //end if
+
+    client.stop();
+
+    if(version > MY_VERSION) {
+        Serial.println("Server has version " + String(version) + ".  Doing update.");
+        doOTAupdate();
+    }
+
 }//end send
