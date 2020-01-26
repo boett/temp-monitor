@@ -8,7 +8,7 @@
 //#include <DallasTemperature.h>
 #include "HX711.h"
 
-const int MY_VERSION = 6;
+const int MY_VERSION = 11;
 
 const int LOADCELL_DOUT_PIN = 4;
 const int LOADCELL_SCK_PIN = 0;
@@ -39,7 +39,7 @@ nw networks[] = { {"ssid1", "pw1"},
 
 
 template <typename T>
-String build_json(const String name, T val, const String &id = String(""))
+String build_json(const String name, T val, const String &id = String(""), const String &debug = String(""))
 {
     String idStr = id;
 
@@ -49,20 +49,22 @@ String build_json(const String name, T val, const String &id = String(""))
         idStr = name + msg;
     }
 
-    String obj = "{ \"type\": \"" + name + "\", \"val\": " + String(val) + ", \"id\": \"" + idStr + "\"}";
+    String obj = "{ \"type\": \"" + name + "\", \"val\": " + String(val) + ", \"id\": \"" + idStr + "\"" + debug + "}";
     return obj;
 }
 
 struct Averager {
     double cur_val;
+    double debug_arr[80];
     int cnt;
     void submit(double val) {
         cur_val += val;
+        debug_arr[cnt] = val;
         cnt++;
     }
     void reset() {
         cnt = 0;
-        cur_val = 0;
+        cur_val = 0.0;
     }
     double val() {
         return cur_val / static_cast<double>(cnt);
@@ -74,15 +76,23 @@ struct Sensor {
     String id;
     Averager avg;
     bool present;
+    bool debug;
 
-    Sensor() : present(true) {}
+    Sensor() : present(true), debug(false) {}
     bool is_present() const { return present; }
     virtual double get_cur_reading() = 0;
     void DoMeasure() {
         avg.submit(get_cur_reading());
     }
     String GetJSONObj(void) {
-        return build_json(name, avg.val(), id);
+        String obj = "";
+        if(debug) {
+            obj = ", \"debug\": [";
+            for(int i=0; i<avg.cnt; i++) {
+                obj += String(avg.debug_arr[i]) + ((i != avg.cnt-1) ? ", " : "]");
+            }
+        }
+        return build_json(name, avg.val(), id, obj);
     }
 };
 
@@ -90,6 +100,7 @@ struct Scale : public Sensor {
     double get_cur_reading() override {
         if (scale.is_ready()) {
             long x = scale.read_average(8);
+            //long x = scale.read();
             Serial.println(x);
             return(static_cast<double>(x));
         } else {
@@ -116,12 +127,14 @@ void setup() {
     connectWifi();
 
     scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
+    scale.set_gain(128);
     scale.power_up();
 
     pinMode(PIR_PIN, INPUT);
 
     Scale *s = new Scale();
     s->name = "strain";
+    s->debug = true;
     sensors.push_back(s);
 
     PIR *p = new PIR();
@@ -193,7 +206,7 @@ void loop() {
         }
     }
 
-    delay(1000);
+    delay(800);
 }
 
 void connectWifi()
@@ -236,8 +249,8 @@ String build_full_json()
     String json = "{ \"measurements\": [";
     bool first = true;
     for(auto &s : sensors) {
-        if(!s->is_present())
-            continue;
+        //if(!s->is_present())
+        //    continue;
             
         if(!first) {
             json += ", ";
