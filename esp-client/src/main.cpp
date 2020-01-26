@@ -4,6 +4,8 @@
 //nodemcu pinout https://github.com/esp8266/Arduino/issues/584
 #include <ESP8266WiFi.h>
 #include <ESP8266httpUpdate.h>
+#include <ArduinoHttpClient.h>
+#include <ArduinoJson.h>
 //#include <OneWire.h>
 //#include <DallasTemperature.h>
 #include "HX711.h"
@@ -37,22 +39,6 @@ nw networks[] = { {"ssid1", "pw1"},
 */
 #include "networks.h"
 
-
-template <typename T>
-String build_json(const String name, T val, const String &id = String(""), const String &debug = String(""))
-{
-    String idStr = id;
-
-    if(id.length() == 0) {
-        char msg[32];
-        sprintf(msg, "%08X", ESP.getChipId());
-        idStr = name + msg;
-    }
-
-    String obj = "{ \"type\": \"" + name + "\", \"val\": " + String(val) + ", \"id\": \"" + idStr + "\"" + debug + "}";
-    return obj;
-}
-
 struct Averager {
     double cur_val;
     double debug_arr[80];
@@ -78,25 +64,34 @@ struct Sensor {
     bool present;
     bool debug;
 
-    Sensor() : present(true), debug(false) {}
+    Sensor(const char *_name) : name(_name), present(true), debug(false) {
+        char msg[32];
+        sprintf(msg, "%08X", ESP.getChipId());
+        id = name + msg;
+    }
     bool is_present() const { return present; }
     virtual double get_cur_reading() = 0;
     void DoMeasure() {
         avg.submit(get_cur_reading());
     }
-    String GetJSONObj(void) {
-        String obj = "";
+    void AddJSONObj(JsonObject &obj)
+    {
+        obj["type"] = name;
+        obj["id"] = id;
+        obj["val"] = avg.val();
+
         if(debug) {
-            obj = ", \"debug\": [";
+            JsonArray debug_arr = obj.createNestedArray("debug");
             for(int i=0; i<avg.cnt; i++) {
-                obj += String(avg.debug_arr[i]) + ((i != avg.cnt-1) ? ", " : "]");
+                debug_arr.add(avg.debug_arr[i]);
             }
         }
-        return build_json(name, avg.val(), id, obj);
     }
 };
 
 struct Scale : public Sensor {
+    Scale() : Sensor("strain") {}
+
     double get_cur_reading() override {
         if (scale.is_ready()) {
             long x = scale.read_average(8);
@@ -112,6 +107,8 @@ struct Scale : public Sensor {
 };
 
 struct PIR : public Sensor {
+    PIR() : Sensor("pir") {}
+
     double get_cur_reading() override {
         Serial.println(digitalRead(PIR_PIN));
         return static_cast<double>(digitalRead(PIR_PIN));
@@ -121,24 +118,21 @@ struct PIR : public Sensor {
 std::vector<Sensor *> sensors;
 int cntReading = 0;
 
-int sent = 0;
 void setup() {
     Serial.begin(115200);
     connectWifi();
 
     scale.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
-    scale.set_gain(128);
-    scale.power_up();
+    //scale.set_gain(128);
+    //scale.power_up();
 
     pinMode(PIR_PIN, INPUT);
 
     Scale *s = new Scale();
-    s->name = "strain";
     s->debug = true;
     sensors.push_back(s);
 
     PIR *p = new PIR();
-    p->name = "pir";
     sensors.push_back(p);
 
   //DS18B20.begin();
@@ -211,77 +205,61 @@ void loop() {
 
 void connectWifi()
 {
-  int n = WiFi.scanNetworks();
-  nw network = {NULL, NULL};
-  for (int i = 0; i < n; ++i) {
-      // Print SSID and RSSI for each network found
-      Serial.print(i + 1);
-      Serial.print(": ");
-      Serial.print(WiFi.SSID(i));
-      Serial.print(" (");
-      Serial.print(WiFi.RSSI(i));
-      Serial.print(")");
-      Serial.println((WiFi.encryptionType(i) == ENC_TYPE_NONE) ? " " : "*");
+    int n = WiFi.scanNetworks();
+    nw network = {NULL, NULL};
 
-      for (int j = 0; networks[j].ssid != NULL; ++j) {
-	if(String(networks[j].ssid) == WiFi.SSID(i)) {
-	  network = networks[j];
-	}
-      }
-  }
+    Serial.println("");
+    for (int i = 0; i < n; ++i) {
+        // Print SSID and RSSI for each network found
+        Serial.printf("%i: %s (%i)%c\n", i, WiFi.SSID(i).c_str(), WiFi.RSSI(i),
+                      (WiFi.encryptionType(i) == ENC_TYPE_NONE) ? ' ' : '*');
 
-  if(network.ssid != NULL) {
-    Serial.print(String("Connecting to ") + network.ssid);
-    WiFi.begin(network.ssid, network.pwd);
-    while (WiFi.status() != WL_CONNECTED) {
-      delay(1000);
-      Serial.print(".");
+        for (int j = 0; networks[j].ssid != NULL; ++j) {
+            if (String(networks[j].ssid) == WiFi.SSID(i)) {
+                network = networks[j];
+            }
+        }
     }
-  }
-  
-  Serial.println("");
-  Serial.println("Connected");
-  Serial.println("");  
-}//end connect
+
+    if(network.ssid != NULL) {
+        Serial.print(String("Connecting to ") + network.ssid);
+        WiFi.begin(network.ssid, network.pwd);
+        while (WiFi.status() != WL_CONNECTED) {
+        delay(1000);
+        Serial.print(".");
+        }
+    }
+
+    Serial.println("\nConnected\n");
+}
 
 String build_full_json()
 {
-    String json = "{ \"measurements\": [";
-    bool first = true;
+    DynamicJsonDocument  doc(2000);
+    JsonArray meas = doc.createNestedArray("measurements");
+
     for(auto &s : sensors) {
         //if(!s->is_present())
         //    continue;
-            
-        if(!first) {
-            json += ", ";
-        }
-        first = false;
-        json += s->GetJSONObj();
+
+        JsonObject sensor_obj = meas.createNestedObject();
+        s->AddJSONObj(sensor_obj);
     }
-    json += " ]}";
-    return json;
+
+    String json;
+    serializeJson(doc, json);
+    return(json);
 }
 
 void sendJSON(const String &json)
 {
     WiFiClient client;
-    if (client.connect(server, 80)) { // use ip 184.106.153.149 or api.thingspeak.com
-        Serial.println("WiFi Client connected ");
-        
-        client.print("POST /post_measurements HTTP/1.1\n");
-        client.print(String("Host: ") + server + "\n");
-        client.print("Connection: close\n");
-        client.print("Content-Type: application/json\n");
-        client.print("Content-Length: ");
-        client.print(json.length());
-        client.print("\n\n");
-        client.print(json);
-        delay(1000);
-        client.read();
-   }//end if
-   sent++;
-   client.stop();
-}//end send
+    HttpClient http = HttpClient(client, server, 80);
+    http.post("/post_measurements", "application/json", json);
+    String response = http.responseBody();
+    Serial.println(response);
+    client.stop();
+}
 
 void sayHello()
 {
@@ -290,46 +268,29 @@ void sayHello()
     char msg[32];
     sprintf(msg, "%08X", ESP.getChipId());
 
-    String postStr = String("{ \"chip\": \"") + msg + "\" }";
-    Serial.println(postStr);
+    DynamicJsonDocument  doc(2000);
+    doc["chip"] = msg;
+    doc["version"] = MY_VERSION;
 
-    uint8_t buf[256];
+    String postStr;
+    serializeJson(doc, postStr);
 
     WiFiClient client;
-    int version = 0;
-
-    if (client.connect(server, 80))
-    { // use ip 184.106.153.149 or api.thingspeak.com
-        Serial.println("WiFi Client connected ");
-
-        client.print("POST /hello HTTP/1.1\n");
-        client.print(String("Host: ") + server + "\n");
-        client.print("Connection: close\n");
-        client.print("Content-Type: application/json\n");
-        client.print("Content-Length: ");
-        client.print(postStr.length());
-        client.print("\n\n");
-        client.print(postStr);
-        delay(1000);
-        int ret = client.read(buf, 256);
-        (void) ret;
-
-        String servermessage(reinterpret_cast<char *>(&buf[0]));
-        //Serial.println(String(ret) + " " + servermessage);
-        //int headerend = servermessage.indexOf("\r\n\r\n");
-        //Serial.println(servermessage.substring(headerend));
-
-        int veroffset = servermessage.indexOf("fwversion\": ");
-        String version_partial = servermessage.substring(veroffset + 12);
-        int verend = version_partial.indexOf("\n");
-
-        version = version_partial.substring(0, verend).toInt();
-        //Serial.println(String("***") + String(version) + String("***"));
-
-        Serial.println("Server has version " + String(version));
-    } //end if
-
+    HttpClient http = HttpClient(client, server, 80);
+    http.post("/hello", "application/json", postStr);
     client.stop();
+
+    String response = http.responseBody();
+
+    DynamicJsonDocument serverJson(256);
+    DeserializationError ret = deserializeJson(serverJson, response);
+    Serial.println(ret.c_str());
+
+    JsonObject sinfo = serverJson["data"];
+    serializeJson(sinfo, Serial);
+
+    int version = sinfo["fwversion"];
+    Serial.println("Server has version " + String(version));
 
     if(version > MY_VERSION) {
         Serial.println("Server has version " + String(version) + ".  Doing update.");
